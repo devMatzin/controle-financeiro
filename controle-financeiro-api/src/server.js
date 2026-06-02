@@ -9,6 +9,33 @@ const recorrentesRoutes = require("./routes/recorrentes.routes");
 const contasFixasRoutes = require("./routes/contasFixas.routes");
 const salarioRoutes = require("./routes/salario.routes");
 const mesesRoutes = require("./routes/meses.routes");
+const { getPool } = require("./db");
+
+
+app.get("/api/test-db", async (req, res) => {
+  try {
+    const pool = await getPool();
+
+    const result = await pool.request().query(`
+      SELECT 
+        DB_NAME() AS databaseName,
+        SYSDATETIME() AS serverTime;
+    `);
+
+    return res.json({
+      ok: true,
+      data: result.recordset[0],
+    });
+  } catch (error) {
+    console.error("ERRO TEST-DB:", error);
+
+    return res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
 
 const app = express();
 const isProduction = process.env.NODE_ENV === "production";
