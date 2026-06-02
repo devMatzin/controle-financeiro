@@ -132,6 +132,8 @@ const currency = new Intl.NumberFormat("pt-BR", {
   currency: "BRL",
 });
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:3001/api";
+const SELECTED_BILLING_MONTH_CACHE_KEY =
+  "controleFinanceiro.selectedBillingMonth";
 const initialCards = [
   {
     id: 1,
@@ -359,8 +361,26 @@ function parseBrazilianDate(dateText) {
   }
   return parsedDate;
 }
+function parseDateValue(value) {
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+
+  const dateText = String(value ?? "").trim();
+  if (!dateText) return null;
+
+  const brazilianDate = parseBrazilianDate(dateText);
+  if (brazilianDate) return brazilianDate;
+
+  const parsedDate = new Date(dateText);
+  return Number.isNaN(parsedDate.getTime()) ? null : parsedDate;
+}
+function formatApiDateText(value) {
+  const parsedDate = parseDateValue(value);
+  return parsedDate ? formatBrazilianDateTime(parsedDate) : String(value ?? "");
+}
 function dateTextToDateTimeLocal(dateText) {
-  const parsedDate = parseBrazilianDate(dateText);
+  const parsedDate = parseDateValue(dateText);
   if (!parsedDate) return getCurrentDateTimeLocal();
   return `${parsedDate.getFullYear()}-${padNumber(parsedDate.getMonth() + 1)}-${padNumber(parsedDate.getDate())}T${padNumber(parsedDate.getHours())}:${padNumber(parsedDate.getMinutes())}`;
 }
@@ -373,7 +393,7 @@ function dateTimeLocalToDateText(dateTimeLocal) {
   return formatBrazilianDateTime(parsedDate);
 }
 function getMonthKeyFromDateText(dateText) {
-  const parsedDate = parseBrazilianDate(dateText);
+  const parsedDate = parseDateValue(dateText);
   if (!parsedDate) return "sem-data";
   return `${parsedDate.getFullYear()}-${padNumber(parsedDate.getMonth() + 1)}`;
 }
@@ -403,6 +423,33 @@ function getMonthLabel(monthKey) {
 function getCurrentMonthKey() {
   const today = new Date();
   return `${today.getFullYear()}-${padNumber(today.getMonth() + 1)}`;
+}
+function readCachedBillingMonth() {
+  if (typeof window === "undefined") return "";
+
+  try {
+    return normalizeMonthKey(
+      window.localStorage.getItem(SELECTED_BILLING_MONTH_CACHE_KEY),
+    );
+  } catch {
+    return "";
+  }
+}
+function saveCachedBillingMonth(monthKey) {
+  const normalizedMonthKey = normalizeMonthKey(monthKey);
+  if (!normalizedMonthKey || typeof window === "undefined") return;
+
+  try {
+    window.localStorage.setItem(
+      SELECTED_BILLING_MONTH_CACHE_KEY,
+      normalizedMonthKey,
+    );
+  } catch {
+    // Ignore storage failures, for example private mode restrictions.
+  }
+}
+function getInitialBillingMonth() {
+  return readCachedBillingMonth() || getCurrentMonthKey();
 }
 function getPreviousMonthKey(monthKey) {
   const [year, month] = String(monthKey || "")
@@ -531,23 +578,25 @@ function getBillingMonthOptions(source = []) {
 }
 function calculateBaseTotalsByCard(cardBaseCharges, selectedHistoryMonth) {
   return cardBaseCharges.reduce((acc, item) => {
-    if (item.monthKey !== selectedHistoryMonth) return acc;
-    acc[item.cardId] = (acc[item.cardId] || 0) + item.amount;
+    if (getCardBaseChargeMonthKey(item) !== selectedHistoryMonth) return acc;
+    const cardId = getCardBaseChargeCardId(item);
+    if (!Number.isFinite(cardId) || cardId <= 0) return acc;
+    acc[cardId] = (acc[cardId] || 0) + getCardBaseChargeAmount(item);
     return acc;
   }, {});
 }
 function calculateVariableTotalsByCard(history, selectedHistoryMonth) {
   return history.reduce((acc, item) => {
     if (getHistoryMonthKey(item) !== selectedHistoryMonth) return acc;
-    acc[item.cardName] = (acc[item.cardName] || 0) + item.amount;
+    acc[item.cardName] = (acc[item.cardName] || 0) + getHistoryAmount(item);
     return acc;
   }, {});
 }
 function calculateRecurringTotalsByCard(subscriptions) {
   return subscriptions.reduce((acc, subscription) => {
-    if (!subscription.inInvoice || !subscription.cardId) return acc;
-    acc[subscription.cardId] =
-      (acc[subscription.cardId] || 0) + subscription.amount;
+    const cardId = getSubscriptionCardId(subscription);
+    if (!getSubscriptionInInvoice(subscription) || !cardId) return acc;
+    acc[cardId] = (acc[cardId] || 0) + getSubscriptionAmount(subscription);
     return acc;
   }, {});
 }
@@ -567,8 +616,159 @@ function getCardName(card) {
   return card?.name ?? card?.Nome ?? "";
 }
 function getFixedBillCategory(bill) {
-  const category = bill?.category ?? bill?.Categoria ?? "";
+  const category = bill?.category ?? bill?.Categoria ?? bill?.categoria ?? "";
   return category === "Conta fixa" ? "" : category;
+}
+function normalizeId(value) {
+  const numericId = Number(value);
+  return Number.isFinite(numericId) ? numericId : value;
+}
+function getCardBaseChargeMonthKey(item) {
+  return normalizeMonthKey(
+    item?.monthKey ??
+      item?.MonthKey ??
+      item?.mesReferencia ??
+      item?.MesReferencia ??
+      item?.mes_referencia,
+  );
+}
+function getCardBaseChargeCardId(item) {
+  return Number(
+    item?.cardId ?? item?.CardId ?? item?.idCartao ?? item?.IdCartao,
+  );
+}
+function getCardBaseChargeAmount(item) {
+  return parseApiMoney(
+    item?.amount ?? item?.Amount ?? item?.valor ?? item?.Valor,
+  );
+}
+function normalizeCardBaseCharge(item) {
+  return {
+    id: normalizeId(item?.id ?? item?.Id),
+    cardId: getCardBaseChargeCardId(item),
+    monthKey: getCardBaseChargeMonthKey(item),
+    description:
+      item?.description ??
+      item?.Description ??
+      item?.descricao ??
+      item?.Descricao ??
+      "Parcelas em andamento",
+    amount: getCardBaseChargeAmount(item),
+  };
+}
+function getFixedBillAmount(bill) {
+  return parseApiMoney(
+    bill?.amount ?? bill?.Amount ?? bill?.valor ?? bill?.Valor,
+  );
+}
+function normalizeFixedBill(bill) {
+  return {
+    id: normalizeId(bill?.id ?? bill?.Id),
+    name: bill?.name ?? bill?.Nome ?? bill?.nome ?? "",
+    amount: getFixedBillAmount(bill),
+    dueDay: Number(bill?.dueDay ?? bill?.DiaVencimento ?? bill?.diaVencimento),
+    paid: toBoolean(bill?.paid ?? bill?.Pago ?? bill?.pago),
+    category: getFixedBillCategory(bill),
+  };
+}
+function getSubscriptionCardId(subscription) {
+  return Number(
+    subscription?.cardId ??
+      subscription?.CardId ??
+      subscription?.idCartao ??
+      subscription?.IdCartao,
+  );
+}
+function getSubscriptionAmount(subscription) {
+  return parseApiMoney(
+    subscription?.amount ??
+      subscription?.Amount ??
+      subscription?.valor ??
+      subscription?.Valor,
+  );
+}
+function getSubscriptionInInvoice(subscription) {
+  return toBoolean(
+    subscription?.inInvoice ??
+      subscription?.InInvoice ??
+      subscription?.entraNaFatura ??
+      subscription?.EntraNaFatura,
+  );
+}
+function normalizeSubscription(subscription) {
+  const cardId = getSubscriptionCardId(subscription);
+
+  return {
+    id: normalizeId(subscription?.id ?? subscription?.Id),
+    name: subscription?.name ?? subscription?.Nome ?? subscription?.nome ?? "",
+    amount: getSubscriptionAmount(subscription),
+    chargeDay: Number(
+      subscription?.chargeDay ??
+        subscription?.DiaCobranca ??
+        subscription?.diaCobranca,
+    ),
+    cardId: Number.isFinite(cardId) && cardId > 0 ? cardId : null,
+    category:
+      subscription?.category ??
+      subscription?.Categoria ??
+      subscription?.categoria ??
+      "Streaming",
+    inInvoice: getSubscriptionInInvoice(subscription),
+  };
+}
+function getHistoryCardId(item) {
+  return Number(
+    item?.cardId ?? item?.CardId ?? item?.idCartao ?? item?.IdCartao,
+  );
+}
+function getHistoryAmount(item) {
+  return parseApiMoney(
+    item?.amount ?? item?.Amount ?? item?.valor ?? item?.Valor,
+  );
+}
+function normalizeHistoryItem(item, cards = []) {
+  const cardId = getHistoryCardId(item);
+  const linkedCard = cards.find((card) => getCardId(card) === cardId);
+  const date = formatApiDateText(
+    item?.date ??
+      item?.Date ??
+      item?.data ??
+      item?.Data ??
+      item?.dataHora ??
+      item?.DataHora,
+  );
+  const billingMonth = getHistoryBillingMonthKey(item);
+
+  return {
+    id: normalizeId(item?.id ?? item?.Id ?? item?.idGasto ?? item?.IdGasto),
+    cardId: Number.isFinite(cardId) && cardId > 0 ? cardId : null,
+    cardName:
+      item?.cardName ??
+      item?.CardName ??
+      item?.nomeCartao ??
+      item?.NomeCartao ??
+      item?.cartaoNome ??
+      item?.CartaoNome ??
+      item?.cartao?.name ??
+      item?.cartao?.Nome ??
+      item?.Cartao?.Nome ??
+      getCardName(linkedCard),
+    description:
+      item?.description ??
+      item?.Description ??
+      item?.descricao ??
+      item?.Descricao ??
+      "Gasto Mês",
+    date,
+    amount: getHistoryAmount(item),
+    before: parseApiMoney(
+      item?.before ?? item?.Before ?? item?.antes ?? item?.Antes,
+    ),
+    after: parseApiMoney(
+      item?.after ?? item?.After ?? item?.depois ?? item?.Depois,
+    ),
+    ...(billingMonth ? { mesReferencia: billingMonth } : {}),
+  };
 }
 const subscriptionIconMatches = [
   {
@@ -1159,7 +1359,7 @@ function getSubscriptionIconConfig(name) {
   );
 }
 function getHistorySortKey(item) {
-  const parsedDate = parseBrazilianDate(item.date);
+  const parsedDate = parseDateValue(item.date);
   return parsedDate ? parsedDate.getTime() : Number.POSITIVE_INFINITY;
 }
 function buildHistoryRowsForMonth(
@@ -1187,10 +1387,12 @@ function buildHistoryRowsForMonth(
     })
     .forEach((item) => {
       const before = runningTotalsByCardName[item.cardName] || 0;
-      const after = before + item.amount;
+      const amount = getHistoryAmount(item);
+      const after = before + amount;
       runningTotalsByCardName[item.cardName] = after;
       rowsById.set(item.id, {
         ...item,
+        amount,
         before: Number(before.toFixed(2)),
         after: Number(after.toFixed(2)),
       });
@@ -1344,6 +1546,10 @@ function runSelfTests() {
     "Histórico deve gerar chave mensal.",
   );
   console.assert(
+    getMonthKeyFromDateText("2026-07-01T10:00:00") === "2026-07",
+    "Histórico deve aceitar data ISO retornada pela API.",
+  );
+  console.assert(
     parseBrazilianDate("31/02/2026 12:00:00") === null,
     "Data inválida não deve ser normalizada.",
   );
@@ -1378,6 +1584,19 @@ function runSelfTests() {
       "2026-06",
     ).Nubank,
     "Data do gasto não deve sobrescrever a fatura informada pela API.",
+  );
+  console.assert(
+    calculateBaseTotalsByCard(
+      [{ IdCartao: 1, MesReferencia: "2026-07", Valor: "10,50" }],
+      "2026-07",
+    )[1] === 10.5,
+    "Base/parcelas deve aceitar campos da API em português.",
+  );
+  console.assert(
+    calculateRecurringTotalsByCard([
+      { IdCartao: 2, Valor: "20,00", EntraNaFatura: true },
+    ])[2] === 20,
+    "Recorrentes devem aceitar campos da API em português.",
   );
   console.assert(
     getBillingMonthOptions(["2026-08", "2026-08", "sem-data"]).join(",") ===
@@ -1500,10 +1719,10 @@ function App() {
   const [baseChargeInputs, setBaseChargeInputs] = useState({});
   const [savingBaseChargeCardId, setSavingBaseChargeCardId] = useState(null);
   const [selectedBillingMonth, setSelectedBillingMonth] = useState(() =>
-    getCurrentMonthKey(),
+    getInitialBillingMonth(),
   );
   const [selectedHistoryMonth, setSelectedHistoryMonth] = useState(() =>
-    getCurrentMonthKey(),
+    getInitialBillingMonth(),
   );
   const [editingHistoryId, setEditingHistoryId] = useState(null);
   const [historyDraft, setHistoryDraft] = useState({
@@ -1537,33 +1756,48 @@ function App() {
       setLoading(true);
       setError("");
       const latestBillingMonths = await fetchBillingMonthsData();
+      const requestedMonth =
+        normalizeMonthKey(monthKey) || getCurrentMonthKey();
       const nextBillingMonthOptions =
-        latestBillingMonths.length > 0
-          ? latestBillingMonths
-          : [getCurrentMonthKey()];
-      const dashboardMonth = nextBillingMonthOptions.includes(monthKey)
-        ? monthKey
+        latestBillingMonths.length > 0 ? latestBillingMonths : [requestedMonth];
+      const dashboardMonth = nextBillingMonthOptions.includes(requestedMonth)
+        ? requestedMonth
         : nextBillingMonthOptions[0];
+      if (dashboardMonth !== requestedMonth) {
+        setSelectedBillingMonth(dashboardMonth);
+      }
       const data = await fetchDashboardData(dashboardMonth);
 
       /*console.log("Dashboard API:", data);*/
 
       const apiCards = (data.cards || data.cartoes || []).map((card) => ({
         id: Number(card.id ?? card.Id),
-        name: card.name ?? card.Nome,
-        closeDay: card.closeDay ?? card.DiaFechamento ?? null,
-        dueDay: card.dueDay ?? card.DiaVencimento,
-        paid: toBoolean(card.paid ?? card.Pago),
-        tone: card.tone ?? card.CorClasse,
+        name: card.name ?? card.Nome ?? card.nome,
+        closeDay:
+          card.closeDay ?? card.DiaFechamento ?? card.diaFechamento ?? null,
+        dueDay: card.dueDay ?? card.DiaVencimento ?? card.diaVencimento,
+        paid: toBoolean(card.paid ?? card.Pago ?? card.pago),
+        tone: card.tone ?? card.CorClasse ?? card.corClasse,
       }));
-      const apiCardBaseCharges =
+      const rawCardBaseCharges =
         data.cardBaseCharges ||
         data.cartaoBaseParcelas ||
         data.baseParcelas ||
         [];
-      const apiFixedBills = data.fixedBills || data.contasFixas || [];
-      const apiSubscriptions = data.subscriptions || data.recorrentes || [];
-      const apiHistory = data.history || data.historico || [];
+      const apiCardBaseCharges = rawCardBaseCharges.map(
+        normalizeCardBaseCharge,
+      );
+      const apiFixedBills = (data.fixedBills || data.contasFixas || []).map(
+        normalizeFixedBill,
+      );
+      const apiSubscriptions = (
+        data.subscriptions ||
+        data.recorrentes ||
+        []
+      ).map(normalizeSubscription);
+      const apiHistory = (data.history || data.historico || []).map((item) =>
+        normalizeHistoryItem(item, apiCards),
+      );
       const apiSalary = getSalaryFromDashboardData(data);
       setCards(apiCards);
       setCardBaseCharges(apiCardBaseCharges);
@@ -1591,8 +1825,8 @@ function App() {
   const billingMonthOptions = useMemo(() => {
     const apiMonths = getBillingMonthOptions(apiBillingMonthOptions);
 
-    return apiMonths.length > 0 ? apiMonths : [getCurrentMonthKey()];
-  }, [apiBillingMonthOptions]);
+    return apiMonths.length > 0 ? apiMonths : [selectedBillingMonth];
+  }, [apiBillingMonthOptions, selectedBillingMonth]);
 
   const activeHistoryMonth =
     historyMonthOptions.length > 0 &&
@@ -1602,6 +1836,9 @@ function App() {
   const activeBillingMonth = billingMonthOptions.includes(selectedBillingMonth)
     ? selectedBillingMonth
     : billingMonthOptions[0] || getCurrentMonthKey();
+  useEffect(() => {
+    saveCachedBillingMonth(activeBillingMonth);
+  }, [activeBillingMonth]);
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
       loadDashboard(activeBillingMonth);
@@ -1627,7 +1864,8 @@ function App() {
     ],
   );
   const selectedHistoryTotal = useMemo(
-    () => filteredHistory.reduce((sum, item) => sum + item.amount, 0),
+    () =>
+      filteredHistory.reduce((sum, item) => sum + getHistoryAmount(item), 0),
     [filteredHistory],
   );
   const baseTotalsByCard = useMemo(
@@ -1672,10 +1910,11 @@ function App() {
   const recurringTotal = useMemo(
     () =>
       subscriptions
-        .filter((subscription) =>
-          toBoolean(subscription.inInvoice ?? subscription.EntraNaFatura),
-        )
-        .reduce((sum, subscription) => sum + subscription.amount, 0),
+        .filter((subscription) => getSubscriptionInInvoice(subscription))
+        .reduce(
+          (sum, subscription) => sum + getSubscriptionAmount(subscription),
+          0,
+        ),
     [subscriptions],
   );
   const totalOpen = useMemo(() => {
@@ -1690,8 +1929,8 @@ function App() {
         0,
       );
     const openFixedBills = fixedBills
-      .filter((bill) => !toBoolean(bill.paid ?? bill.Pago))
-      .reduce((sum, bill) => sum + bill.amount, 0);
+      .filter((bill) => !toBoolean(bill.paid ?? bill.Pago ?? bill.pago))
+      .reduce((sum, bill) => sum + getFixedBillAmount(bill), 0);
     return openCards + openFixedBills;
   }, [
     cards,
@@ -1712,8 +1951,8 @@ function App() {
         0,
       );
     const paidFixedBills = fixedBills
-      .filter((bill) => toBoolean(bill.paid ?? bill.Pago))
-      .reduce((sum, bill) => sum + bill.amount, 0);
+      .filter((bill) => toBoolean(bill.paid ?? bill.Pago ?? bill.pago))
+      .reduce((sum, bill) => sum + getFixedBillAmount(bill), 0);
     return paidCards + paidFixedBills;
   }, [
     cards,
@@ -2284,11 +2523,9 @@ function App() {
       setError("Streaming/recorrente não encontrado.");
       return;
     }
-    const currentInInvoice = toBoolean(
-      subscription.inInvoice ?? subscription.EntraNaFatura,
-    );
+    const currentInInvoice = getSubscriptionInInvoice(subscription);
     const nextInInvoice = !currentInInvoice;
-    const currentCardId = Number(subscription.cardId ?? subscription.IdCartao);
+    const currentCardId = getSubscriptionCardId(subscription);
     const fallbackCardId = Number(cards[0]?.id ?? cards[0]?.Id);
     const nextCardId = nextInInvoice ? currentCardId || fallbackCardId : null;
     if (nextInInvoice && !nextCardId) {
@@ -2370,7 +2607,7 @@ function App() {
       dateInput: dateTextToDateTimeLocal(item.date),
       cardName: item.cardName,
       description: item.description,
-      amount: formatMoneyInput(String(item.amount).replace(".", ",")),
+      amount: formatApiMoneyInput(getHistoryAmount(item)),
     });
   }
   function cancelEditingHistory() {
@@ -2397,13 +2634,15 @@ function App() {
       return;
     }
     const nextDate = dateTimeLocalToDateText(historyDraft.dateInput);
-    const nextMonth = getMonthKeyFromDateText(nextDate);
+    const nextMonth =
+      getHistoryBillingMonthKey(item) || getMonthKeyFromDateText(nextDate);
     const nextDescription = historyDraft.description.trim() || "Gasto Mês";
     const payload = {
       idCartao: Number(targetCard.id ?? targetCard.Id),
       descricao: nextDescription,
       valor: Number(numericValue.toFixed(2)),
       dataHora: historyDraft.dateInput,
+      mesReferencia: nextMonth,
     };
     try {
       setLoading(true);
@@ -2432,10 +2671,10 @@ function App() {
   }
   async function removeHistoryItem(item) {
     const confirmed = window.confirm(
-      `Deseja excluir o gasto "${item.description}" no valor de ${currency.format(item.amount)}?`,
+      `Deseja excluir o gasto "${item.description}" no valor de ${currency.format(getHistoryAmount(item))}?`,
     );
     if (!confirmed) return;
-    const itemMonth = getMonthKeyFromDateText(item.date);
+    const itemMonth = getHistoryMonthKey(item);
     try {
       setLoading(true);
       setError("");
@@ -2462,7 +2701,15 @@ function App() {
     if (Object.prototype.hasOwnProperty.call(baseChargeInputs, inputKey)) {
       return baseChargeInputs[inputKey];
     }
-    return "";
+
+    const savedCharge = cardBaseCharges.find(
+      (item) =>
+        getCardBaseChargeMonthKey(item) === activeBillingMonth &&
+        getCardBaseChargeCardId(item) === Number(cardId),
+    );
+    return savedCharge
+      ? formatApiMoneyInput(getCardBaseChargeAmount(savedCharge))
+      : "";
   }
   function updateCardBaseChargeInput(cardId, value) {
     const inputKey = `${activeBillingMonth}-${cardId}`;
@@ -2505,10 +2752,11 @@ function App() {
         throw new Error(responseData?.error || "Erro ao salvar base/parcelas.");
       }
       await loadDashboard(activeBillingMonth);
-      setBaseChargeInputs((current) => ({
-        ...current,
-        [inputKey]: "",
-      }));
+      setBaseChargeInputs((current) => {
+        const nextInputs = { ...current };
+        delete nextInputs[inputKey];
+        return nextInputs;
+      });
     } catch (err) {
       console.error("Erro ao salvar base/parcelas:", err);
       setError(err.message || "Erro inesperado ao salvar base/parcelas.");
@@ -2840,15 +3088,15 @@ function App() {
                         </div>
                         <h3 className="mt-3 text-lg font-bold">{bill.name}</h3>
                         <p className="mt-1 break-words text-2xl font-black">
-                          {currency.format(bill.amount)}
+                          {currency.format(getFixedBillAmount(bill))}
                         </p>
                       </div>
                       <button
                         type="button"
                         onClick={() => toggleFixedBillPaid(bill.id ?? bill.Id)}
-                        className={`rounded-2xl px-4 py-3 text-sm font-bold transition ${toBoolean(bill.paid ?? bill.Pago) ? "bg-emerald-100 text-emerald-700" : "bg-slate-950 text-white hover:bg-slate-800"}`}
+                        className={`rounded-2xl px-4 py-3 text-sm font-bold transition ${toBoolean(bill.paid ?? bill.Pago ?? bill.pago) ? "bg-emerald-100 text-emerald-700" : "bg-slate-950 text-white hover:bg-slate-800"}`}
                       >
-                        {toBoolean(bill.paid ?? bill.Pago)
+                        {toBoolean(bill.paid ?? bill.Pago ?? bill.pago)
                           ? "Pago"
                           : "Marcar como pago"}
                       </button>
@@ -3316,8 +3564,12 @@ function App() {
 
               <div className="mt-4 space-y-3">
                 {subscriptions.map((subscription) => {
+                  const subscriptionCardId =
+                    getSubscriptionCardId(subscription);
+                  const subscriptionInInvoice =
+                    getSubscriptionInInvoice(subscription);
                   const linkedCard = cards.find(
-                    (card) => card.id === subscription.cardId,
+                    (card) => card.id === subscriptionCardId,
                   );
                   const linkedCardStyles = linkedCard
                     ? getCardColorStyles(linkedCard.name)
@@ -3372,24 +3624,26 @@ function App() {
 
                         <div className="shrink-0 text-left sm:text-right">
                           <p className="font-bold">
-                            {currency.format(subscription.amount)}
+                            {currency.format(
+                              getSubscriptionAmount(subscription),
+                            )}
                           </p>
                           <p
                             className={
-                              subscription.inInvoice
+                              subscriptionInInvoice
                                 ? "text-emerald-600"
                                 : "text-slate-400"
                             }
                           >
-                            {subscription.inInvoice ? "Na fatura" : "Fora"}
+                            {subscriptionInInvoice ? "Na fatura" : "Fora"}
                           </p>
                         </div>
                       </div>
 
                       <div className="mt-3 grid min-w-0 gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
                         <select
-                          value={subscription.cardId || ""}
-                          disabled={!subscription.inInvoice}
+                          value={subscriptionCardId || ""}
+                          disabled={!subscriptionInInvoice}
                           onChange={(event) =>
                             updateSubscriptionCard(
                               subscription.id,
@@ -3419,7 +3673,7 @@ function App() {
                             }
                             className="flex-1 rounded-xl bg-white px-3 py-2 text-xs font-bold text-slate-700 transition hover:bg-slate-200"
                           >
-                            {subscription.inInvoice
+                            {subscriptionInInvoice
                               ? "Tirar da fatura"
                               : "Colocar na fatura"}
                           </button>
@@ -3698,7 +3952,7 @@ function App() {
                                 className="w-full bg-slate-50 px-3 py-2"
                               />
                             ) : (
-                              currency.format(item.amount)
+                              currency.format(getHistoryAmount(item))
                             )}
                           </td>
                           <td className="max-w-[140px] break-words px-4 py-3 align-top">
