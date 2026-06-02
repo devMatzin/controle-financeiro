@@ -377,6 +377,20 @@ function getMonthKeyFromDateText(dateText) {
   if (!parsedDate) return "sem-data";
   return `${parsedDate.getFullYear()}-${padNumber(parsedDate.getMonth() + 1)}`;
 }
+function getHistoryBillingMonthKey(item) {
+  return normalizeMonthKey(
+    item?.mesReferencia ??
+      item?.MesReferencia ??
+      item?.mes_referencia ??
+      item?.monthKey ??
+      item?.MonthKey ??
+      item?.billingMonth ??
+      item?.BillingMonth,
+  );
+}
+function getHistoryMonthKey(item) {
+  return getHistoryBillingMonthKey(item) || getMonthKeyFromDateText(item.date);
+}
 function getMonthLabel(monthKey) {
   if (monthKey === "sem-data") return "Sem data";
   const [year, month] = monthKey.split("-").map(Number);
@@ -468,7 +482,7 @@ function getDefaultHistoryMonth(history) {
 }
 function getMonthOptionsFromHistory(history) {
   const monthKeys = Array.from(
-    new Set([...history.map((item) => getMonthKeyFromDateText(item.date))]),
+    new Set([...history.map((item) => getHistoryMonthKey(item))]),
   );
   return monthKeys.sort((a, b) => b.localeCompare(a));
 }
@@ -524,7 +538,7 @@ function calculateBaseTotalsByCard(cardBaseCharges, selectedHistoryMonth) {
 }
 function calculateVariableTotalsByCard(history, selectedHistoryMonth) {
   return history.reduce((acc, item) => {
-    if (getMonthKeyFromDateText(item.date) !== selectedHistoryMonth) return acc;
+    if (getHistoryMonthKey(item) !== selectedHistoryMonth) return acc;
     acc[item.cardName] = (acc[item.cardName] || 0) + item.amount;
     return acc;
   }, {});
@@ -1156,7 +1170,7 @@ function buildHistoryRowsForMonth(
   recurringTotalsByCard,
 ) {
   const monthItems = history.filter(
-    (item) => getMonthKeyFromDateText(item.date) === monthKey,
+    (item) => getHistoryMonthKey(item) === monthKey,
   );
   const baseTotalsByCard = calculateBaseTotalsByCard(cardBaseCharges, monthKey);
   const runningTotalsByCardName = cards.reduce((acc, card) => {
@@ -1336,6 +1350,34 @@ function runSelfTests() {
   console.assert(
     !getMonthOptionsFromHistory(initialHistory).includes("2026-06"),
     "Histórico não deve listar meses sem lançamentos.",
+  );
+  console.assert(
+    calculateVariableTotalsByCard(
+      [
+        {
+          cardName: "Nubank",
+          date: "01/06/2026 12:00:00",
+          amount: 10,
+          mesReferencia: "2026-07",
+        },
+      ],
+      "2026-07",
+    ).Nubank === 10,
+    "Gasto deve somar na fatura informada pela API.",
+  );
+  console.assert(
+    !calculateVariableTotalsByCard(
+      [
+        {
+          cardName: "Nubank",
+          date: "01/06/2026 12:00:00",
+          amount: 10,
+          mesReferencia: "2026-07",
+        },
+      ],
+      "2026-06",
+    ).Nubank,
+    "Data do gasto não deve sobrescrever a fatura informada pela API.",
   );
   console.assert(
     getBillingMonthOptions(["2026-08", "2026-08", "sem-data"]).join(",") ===
@@ -2055,17 +2097,15 @@ function App() {
       if (!response.ok) {
         throw new Error(responseData?.error || "Erro ao cadastrar gasto.");
       }
-      const newHistoryDate = dateTimeLocalToDateText(expense.dateInput);
-      const newHistoryMonth = getMonthKeyFromDateText(newHistoryDate);
-      setSelectedBillingMonth(newHistoryMonth);
-      setSelectedHistoryMonth(newHistoryMonth);
+      setSelectedBillingMonth(activeBillingMonth);
+      setSelectedHistoryMonth(activeBillingMonth);
       setExpense({
         cardId: Number(selectedCard.id ?? selectedCard.Id),
         description: "",
         amount: "",
         dateInput: getCurrentDateTimeLocal(),
       });
-      await loadDashboard(newHistoryMonth);
+      await loadDashboard(activeBillingMonth);
     } catch (err) {
       console.error("Erro ao cadastrar gasto:", err);
       setError(err.message || "Erro inesperado ao cadastrar gasto.");
