@@ -134,6 +134,8 @@ const currency = new Intl.NumberFormat("pt-BR", {
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:3001/api";
 const SELECTED_BILLING_MONTH_CACHE_KEY =
   "controleFinanceiro.selectedBillingMonth";
+const HISTORY_VIEW_BY_BILLING = "billing";
+const HISTORY_VIEW_BY_EXPENSE_DATE = "expense-date";
 const initialCards = [
   {
     id: 1,
@@ -411,6 +413,14 @@ function getHistoryBillingMonthKey(item) {
 function getHistoryMonthKey(item) {
   return getHistoryBillingMonthKey(item) || getMonthKeyFromDateText(item.date);
 }
+function getHistoryExpenseMonthKey(item) {
+  return getMonthKeyFromDateText(item.date);
+}
+function getHistoryMonthKeyByView(item, historyView) {
+  return historyView === HISTORY_VIEW_BY_EXPENSE_DATE
+    ? getHistoryExpenseMonthKey(item)
+    : getHistoryMonthKey(item);
+}
 function getMonthLabel(monthKey) {
   if (monthKey === "sem-data") return "Sem data";
   const [year, month] = monthKey.split("-").map(Number);
@@ -521,15 +531,20 @@ async function saveSalaryForMonth(monthKey, amount) {
   }
   return responseData;
 }
-function getDefaultHistoryMonth(history) {
-  const availableMonths = getMonthOptionsFromHistory(history);
+function getDefaultHistoryMonth(history, historyView = HISTORY_VIEW_BY_BILLING) {
+  const availableMonths = getMonthOptionsFromHistory(history, historyView);
   const currentMonth = getCurrentMonthKey();
   if (availableMonths.includes(currentMonth)) return currentMonth;
   return availableMonths[0] || currentMonth;
 }
-function getMonthOptionsFromHistory(history) {
+function getMonthOptionsFromHistory(
+  history,
+  historyView = HISTORY_VIEW_BY_BILLING,
+) {
   const monthKeys = Array.from(
-    new Set([...history.map((item) => getHistoryMonthKey(item))]),
+    new Set([
+      ...history.map((item) => getHistoryMonthKeyByView(item, historyView)),
+    ]),
   );
   return monthKeys.sort((a, b) => b.localeCompare(a));
 }
@@ -1362,6 +1377,13 @@ function getHistorySortKey(item) {
   const parsedDate = parseDateValue(item.date);
   return parsedDate ? parsedDate.getTime() : Number.POSITIVE_INFINITY;
 }
+function sortHistoryItemsByDate(items) {
+  return [...items].sort((a, b) => {
+    const dateDiff = getHistorySortKey(a) - getHistorySortKey(b);
+    if (dateDiff !== 0) return dateDiff;
+    return String(a.id).localeCompare(String(b.id));
+  });
+}
 function buildHistoryRowsForMonth(
   history,
   monthKey,
@@ -1379,31 +1401,25 @@ function buildHistoryRowsForMonth(
     return acc;
   }, {});
   const rowsById = new Map();
-  [...monthItems]
-    .sort((a, b) => {
-      const dateDiff = getHistorySortKey(a) - getHistorySortKey(b);
-      if (dateDiff !== 0) return dateDiff;
-      return String(a.id).localeCompare(String(b.id));
-    })
-    .forEach((item) => {
-      const before = runningTotalsByCardName[item.cardName] || 0;
-      const amount = getHistoryAmount(item);
-      const after = before + amount;
-      runningTotalsByCardName[item.cardName] = after;
-      rowsById.set(item.id, {
-        ...item,
-        amount,
-        before: Number(before.toFixed(2)),
-        after: Number(after.toFixed(2)),
-      });
+  const sortedMonthItems = sortHistoryItemsByDate(monthItems);
+  sortedMonthItems.forEach((item) => {
+    const before = runningTotalsByCardName[item.cardName] || 0;
+    const amount = getHistoryAmount(item);
+    const after = before + amount;
+    runningTotalsByCardName[item.cardName] = after;
+    rowsById.set(item.id, {
+      ...item,
+      amount,
+      before: Number(before.toFixed(2)),
+      after: Number(after.toFixed(2)),
     });
-  return [...monthItems]
-    .sort((a, b) => {
-      const dateDiff = getHistorySortKey(a) - getHistorySortKey(b);
-      if (dateDiff !== 0) return dateDiff;
-      return String(a.id).localeCompare(String(b.id));
-    })
-    .map((item) => rowsById.get(item.id) || item);
+  });
+  return sortedMonthItems.map((item) => rowsById.get(item.id) || item);
+}
+function buildExpenseDateHistoryRowsForMonth(history, monthKey) {
+  return sortHistoryItemsByDate(
+    history.filter((item) => getHistoryExpenseMonthKey(item) === monthKey),
+  );
 }
 function getCardColorStyles(cardName) {
   switch (cardName) {
@@ -1562,6 +1578,32 @@ function runSelfTests() {
   console.assert(
     !getMonthOptionsFromHistory(initialHistory).includes("2026-06"),
     "Histórico não deve listar meses sem lançamentos.",
+  );
+  console.assert(
+    getMonthOptionsFromHistory(
+      [
+        {
+          date: "20/06/2026 12:00:00",
+          amount: 10,
+          mesReferencia: "2026-07",
+        },
+      ],
+      HISTORY_VIEW_BY_BILLING,
+    ).join(",") === "2026-07",
+    "Visão por fatura deve listar o mês da cobrança.",
+  );
+  console.assert(
+    getMonthOptionsFromHistory(
+      [
+        {
+          date: "20/06/2026 12:00:00",
+          amount: 10,
+          mesReferencia: "2026-07",
+        },
+      ],
+      HISTORY_VIEW_BY_EXPENSE_DATE,
+    ).join(",") === "2026-06",
+    "Visão por data deve listar o mês do gasto.",
   );
   console.assert(
     calculateVariableTotalsByCard(
@@ -1730,6 +1772,9 @@ function App() {
   const [selectedHistoryMonth, setSelectedHistoryMonth] = useState(() =>
     getInitialBillingMonth(),
   );
+  const [selectedHistoryView, setSelectedHistoryView] = useState(
+    HISTORY_VIEW_BY_BILLING,
+  );
   const [editingHistoryId, setEditingHistoryId] = useState(null);
   const [historyDraft, setHistoryDraft] = useState({
     dateInput: "",
@@ -1823,9 +1868,11 @@ function App() {
     () => calculateRecurringTotalsByCard(subscriptions),
     [subscriptions],
   );
+  const isHistoryByBillingMonth =
+    selectedHistoryView === HISTORY_VIEW_BY_BILLING;
   const historyMonthOptions = useMemo(
-    () => getMonthOptionsFromHistory(history),
-    [history],
+    () => getMonthOptionsFromHistory(history, selectedHistoryView),
+    [history, selectedHistoryView],
   );
 
   const billingMonthOptions = useMemo(() => {
@@ -1837,7 +1884,7 @@ function App() {
   const activeHistoryMonth =
     historyMonthOptions.length > 0 &&
     !historyMonthOptions.includes(selectedHistoryMonth)
-      ? getDefaultHistoryMonth(history)
+      ? getDefaultHistoryMonth(history, selectedHistoryView)
       : selectedHistoryMonth;
   const activeBillingMonth = billingMonthOptions.includes(selectedBillingMonth)
     ? selectedBillingMonth
@@ -1854,16 +1901,19 @@ function App() {
   }, [activeBillingMonth, loadDashboard]);
   const filteredHistory = useMemo(
     () =>
-      buildHistoryRowsForMonth(
-        history,
-        activeHistoryMonth,
-        cards,
-        cardBaseCharges,
-        recurringTotalsByCard,
-      ),
+      isHistoryByBillingMonth
+        ? buildHistoryRowsForMonth(
+            history,
+            activeHistoryMonth,
+            cards,
+            cardBaseCharges,
+            recurringTotalsByCard,
+          )
+        : buildExpenseDateHistoryRowsForMonth(history, activeHistoryMonth),
     [
       history,
       activeHistoryMonth,
+      isHistoryByBillingMonth,
       cards,
       cardBaseCharges,
       recurringTotalsByCard,
@@ -1874,6 +1924,12 @@ function App() {
       filteredHistory.reduce((sum, item) => sum + getHistoryAmount(item), 0),
     [filteredHistory],
   );
+  const historyMonthFieldLabel = isHistoryByBillingMonth
+    ? "Mês da fatura"
+    : "Mês do gasto";
+  const historyEmptyMessage = isHistoryByBillingMonth
+    ? "Nenhum gasto encontrado para esta fatura."
+    : "Nenhum gasto encontrado para este mês.";
   const baseTotalsByCard = useMemo(
     () => calculateBaseTotalsByCard(cardBaseCharges, activeBillingMonth),
     [cardBaseCharges, activeBillingMonth],
@@ -2342,8 +2398,11 @@ function App() {
       if (!response.ok) {
         throw new Error(responseData?.error || "Erro ao cadastrar gasto.");
       }
+      const nextHistoryMonth = isHistoryByBillingMonth
+        ? activeBillingMonth
+        : getMonthKeyFromDateText(expense.dateInput);
       setSelectedBillingMonth(activeBillingMonth);
-      setSelectedHistoryMonth(activeBillingMonth);
+      setSelectedHistoryMonth(nextHistoryMonth);
       setExpense({
         cardId: Number(selectedCard.id ?? selectedCard.Id),
         description: "",
@@ -2642,6 +2701,9 @@ function App() {
     const nextDate = dateTimeLocalToDateText(historyDraft.dateInput);
     const nextMonth =
       getHistoryBillingMonthKey(item) || getMonthKeyFromDateText(nextDate);
+    const nextHistoryMonth = isHistoryByBillingMonth
+      ? nextMonth
+      : getMonthKeyFromDateText(nextDate);
     const nextDescription = historyDraft.description.trim() || "Gasto Mês";
     const payload = {
       idCartao: Number(targetCard.id ?? targetCard.Id),
@@ -2664,7 +2726,7 @@ function App() {
       if (!response.ok) {
         throw new Error(responseData?.error || "Erro ao atualizar gasto.");
       }
-      setSelectedHistoryMonth(nextMonth);
+      setSelectedHistoryMonth(nextHistoryMonth);
       setSelectedBillingMonth(nextMonth);
       cancelEditingHistory();
       await loadDashboard(nextMonth);
@@ -3805,18 +3867,55 @@ function App() {
               <div className="flex min-w-0 flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
                 <div className="min-w-0">
                   <h2 className="text-2xl font-bold text-slate-900">
-                    Histórico de Gastos Mês
+                    Histórico de Gastos
                   </h2>
                   <p className="mt-1 text-sm leading-6 text-slate-500">
-                    Separado por mês. Ao editar data, cartão ou valor, os cards
-                    e totais são atualizados dinamicamente.
+                    Alterna entre a fatura cobrada e a data real do lançamento.
                   </p>
                 </div>
 
-                <div className="grid w-full min-w-0 gap-3 sm:grid-cols-2 xl:max-w-lg">
+                <div className="grid w-full min-w-0 gap-3 sm:grid-cols-2 xl:max-w-2xl">
+                  <div className="flex h-full min-w-0 flex-col justify-between rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm sm:col-span-2">
+                    <p className="text-xs font-bold uppercase tracking-wide text-slate-500">
+                      Visão
+                    </p>
+                    <div className="mt-2 grid grid-cols-2 rounded-xl bg-slate-100 p-1">
+                      <button
+                        type="button"
+                        aria-pressed={isHistoryByBillingMonth}
+                        onClick={() =>
+                          setSelectedHistoryView(HISTORY_VIEW_BY_BILLING)
+                        }
+                        className={`rounded-lg px-3 py-2 text-sm font-bold transition ${
+                          isHistoryByBillingMonth
+                            ? "bg-white text-slate-950 shadow-sm"
+                            : "text-slate-500 hover:text-slate-800"
+                        }`}
+                      >
+                        Por fatura
+                      </button>
+                      <button
+                        type="button"
+                        aria-pressed={!isHistoryByBillingMonth}
+                        onClick={() =>
+                          setSelectedHistoryView(
+                            HISTORY_VIEW_BY_EXPENSE_DATE,
+                          )
+                        }
+                        className={`rounded-lg px-3 py-2 text-sm font-bold transition ${
+                          !isHistoryByBillingMonth
+                            ? "bg-white text-slate-950 shadow-sm"
+                            : "text-slate-500 hover:text-slate-800"
+                        }`}
+                      >
+                        Por data do gasto
+                      </button>
+                    </div>
+                  </div>
+
                   <label className="flex h-full min-w-0 flex-col justify-between rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm">
                     <span className="text-xs font-bold uppercase tracking-wide text-slate-500">
-                      Mês
+                      {historyMonthFieldLabel}
                     </span>
                     <select
                       value={activeHistoryMonth}
@@ -3841,7 +3940,7 @@ function App() {
 
                   <div className="flex h-full min-w-0 flex-col justify-between rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm">
                     <p className="text-xs font-bold uppercase tracking-wide text-slate-500">
-                      Total do mês
+                      Total de gastos
                     </p>
                     <p className="mt-1 text-lg font-black text-slate-900">
                       {currency.format(selectedHistoryTotal)}
@@ -3857,11 +3956,20 @@ function App() {
                   <thead className="bg-slate-100 text-xs uppercase tracking-wide text-slate-600">
                     <tr>
                       <th className="px-4 py-3">Data/hora</th>
+                      {!isHistoryByBillingMonth && (
+                        <th className="px-4 py-3">Mês da fatura</th>
+                      )}
                       <th className="px-4 py-3">Cartão</th>
                       <th className="px-4 py-3">Descrição</th>
-                      <th className="px-4 py-3">Gasto novo</th>
-                      <th className="px-4 py-3">Total antes</th>
-                      <th className="px-4 py-3">Total depois</th>
+                      <th className="px-4 py-3">
+                        {isHistoryByBillingMonth ? "Gasto novo" : "Valor"}
+                      </th>
+                      {isHistoryByBillingMonth && (
+                        <>
+                          <th className="px-4 py-3">Total antes</th>
+                          <th className="px-4 py-3">Total depois</th>
+                        </>
+                      )}
                       <th className="px-4 py-3 text-right">Ações</th>
                     </tr>
                   </thead>
@@ -3869,10 +3977,10 @@ function App() {
                     {filteredHistory.length === 0 && (
                       <tr>
                         <td
-                          colSpan={7}
+                          colSpan={isHistoryByBillingMonth ? 7 : 6}
                           className="px-4 py-8 text-center text-slate-500"
                         >
-                          Nenhum gasto encontrado para este mês.
+                          {historyEmptyMessage}
                         </td>
                       </tr>
                     )}
@@ -3898,6 +4006,11 @@ function App() {
                               item.date
                             )}
                           </td>
+                          {!isHistoryByBillingMonth && (
+                            <td className="max-w-[150px] break-words px-4 py-3 align-top capitalize">
+                              {getMonthLabel(getHistoryMonthKey(item))}
+                            </td>
+                          )}
                           <td className="max-w-[120px] break-words px-4 py-3 align-top">
                             {isEditing ? (
                               <select
@@ -3953,17 +4066,21 @@ function App() {
                               currency.format(getHistoryAmount(item))
                             )}
                           </td>
-                          <td className="max-w-[140px] break-words px-4 py-3 align-top">
-                            {currency.format(item.before)}
-                          </td>
-                          <td className="max-w-[140px] break-words px-4 py-3 align-top font-bold">
-                            {isEditing
-                              ? currency.format(
-                                  item.before +
-                                    (parseMoney(historyDraft.amount) || 0),
-                                )
-                              : currency.format(item.after)}
-                          </td>
+                          {isHistoryByBillingMonth && (
+                            <>
+                              <td className="max-w-[140px] break-words px-4 py-3 align-top">
+                                {currency.format(item.before)}
+                              </td>
+                              <td className="max-w-[140px] break-words px-4 py-3 align-top font-bold">
+                                {isEditing
+                                  ? currency.format(
+                                      item.before +
+                                        (parseMoney(historyDraft.amount) || 0),
+                                    )
+                                  : currency.format(item.after)}
+                              </td>
+                            </>
+                          )}
                           <td className="px-4 py-3 align-top">
                             <div className="flex justify-end gap-2">
                               {isEditing ? (
