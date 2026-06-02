@@ -2701,15 +2701,7 @@ function App() {
     if (Object.prototype.hasOwnProperty.call(baseChargeInputs, inputKey)) {
       return baseChargeInputs[inputKey];
     }
-
-    const savedCharge = cardBaseCharges.find(
-      (item) =>
-        getCardBaseChargeMonthKey(item) === activeBillingMonth &&
-        getCardBaseChargeCardId(item) === Number(cardId),
-    );
-    return savedCharge
-      ? formatApiMoneyInput(getCardBaseChargeAmount(savedCharge))
-      : "";
+    return "";
   }
   function updateCardBaseChargeInput(cardId, value) {
     const inputKey = `${activeBillingMonth}-${cardId}`;
