@@ -1397,7 +1397,13 @@ function buildHistoryRowsForMonth(
         after: Number(after.toFixed(2)),
       });
     });
-  return monthItems.map((item) => rowsById.get(item.id) || item);
+  return [...monthItems]
+    .sort((a, b) => {
+      const dateDiff = getHistorySortKey(a) - getHistorySortKey(b);
+      if (dateDiff !== 0) return dateDiff;
+      return String(a.id).localeCompare(String(b.id));
+    })
+    .map((item) => rowsById.get(item.id) || item);
 }
 function getCardColorStyles(cardName) {
   switch (cardName) {
