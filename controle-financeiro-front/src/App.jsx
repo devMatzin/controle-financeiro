@@ -502,14 +502,6 @@ async function fetchDashboardData(monthKey) {
   }
   return responseData || {};
 }
-async function fetchBillingMonthsData() {
-  const response = await fetch(`${API_URL}/meses`);
-  const responseData = await response.json().catch(() => null);
-  if (!response.ok) {
-    throw new Error(responseData?.error || "Erro ao carregar meses da fatura.");
-  }
-  return getBillingMonthOptions(responseData);
-}
 async function saveSalaryForMonth(monthKey, amount) {
   const numericAmount = Number(amount);
   if (!Number.isFinite(numericAmount) || numericAmount < 0) {
@@ -531,7 +523,10 @@ async function saveSalaryForMonth(monthKey, amount) {
   }
   return responseData;
 }
-function getDefaultHistoryMonth(history, historyView = HISTORY_VIEW_BY_BILLING) {
+function getDefaultHistoryMonth(
+  history,
+  historyView = HISTORY_VIEW_BY_BILLING,
+) {
   const availableMonths = getMonthOptionsFromHistory(history, historyView);
   const currentMonth = getCurrentMonthKey();
   if (availableMonths.includes(currentMonth)) return currentMonth;
@@ -783,6 +778,48 @@ function normalizeHistoryItem(item, cards = []) {
       item?.after ?? item?.After ?? item?.depois ?? item?.Depois,
     ),
     ...(billingMonth ? { mesReferencia: billingMonth } : {}),
+  };
+}
+function normalizeDashboardPayload(
+  data = {},
+  requestedMonth = getCurrentMonthKey(),
+) {
+  const monthKey =
+    normalizeMonthKey(
+      data.monthKey ??
+        data.MonthKey ??
+        data.mesReferencia ??
+        data.MesReferencia ??
+        requestedMonth,
+    ) || requestedMonth;
+  const cards = (data.cards || data.cartoes || []).map((card) => ({
+    id: Number(card.id ?? card.Id),
+    name: card.name ?? card.Nome ?? card.nome,
+    closeDay: card.closeDay ?? card.DiaFechamento ?? card.diaFechamento ?? null,
+    dueDay: card.dueDay ?? card.DiaVencimento ?? card.diaVencimento,
+    paid: toBoolean(card.paid ?? card.Pago ?? card.pago),
+    tone: card.tone ?? card.CorClasse ?? card.corClasse,
+  }));
+  const rawCardBaseCharges =
+    data.cardBaseCharges || data.cartaoBaseParcelas || data.baseParcelas || [];
+  const billingMonthOptions = getBillingMonthOptions(data);
+
+  return {
+    monthKey,
+    salaryInput: formatApiMoneyInput(getSalaryFromDashboardData(data)),
+    cards,
+    cardBaseCharges: rawCardBaseCharges.map(normalizeCardBaseCharge),
+    fixedBills: (data.fixedBills || data.contasFixas || []).map(
+      normalizeFixedBill,
+    ),
+    subscriptions: (data.subscriptions || data.recorrentes || []).map(
+      normalizeSubscription,
+    ),
+    history: (data.history || data.historico || []).map((item) =>
+      normalizeHistoryItem(item, cards),
+    ),
+    billingMonthOptions:
+      billingMonthOptions.length > 0 ? billingMonthOptions : [monthKey],
   };
 }
 const subscriptionIconMatches = [
@@ -1797,128 +1834,130 @@ function App() {
     inInvoice: true,
   });
   const [loading, setLoading] = useState(false);
+  const [dashboardLoading, setDashboardLoading] = useState(false);
   const [error, setError] = useState("");
   const [salaryInput, setSalaryInput] = useState("1.900,00");
   const parsedSalary = parseMoney(salaryInput);
   const salary = Number.isFinite(parsedSalary) ? parsedSalary : 0;
   const dashboardRequestsRef = useRef(new Map());
+  const dashboardCacheRef = useRef(new Map());
+  const latestBillingMonthOptionsRef = useRef([]);
   const latestDashboardRequestIdRef = useRef(0);
   const lastAppliedDashboardMonthRef = useRef("");
 
-  const loadDashboard = useCallback(async (monthKey) => {
-    const requestedMonth = normalizeMonthKey(monthKey) || getCurrentMonthKey();
-    const currentRequest = dashboardRequestsRef.current.get(requestedMonth);
-    if (currentRequest) {
-      return currentRequest;
-    }
+  const applyDashboardData = useCallback((dashboardData, options = {}) => {
+    const latestBillingMonthOptions = latestBillingMonthOptionsRef.current;
+    const nextBillingMonthOptions =
+      options.fromCache && latestBillingMonthOptions.length > 0
+        ? latestBillingMonthOptions
+        : dashboardData.billingMonthOptions;
 
-    const requestId = latestDashboardRequestIdRef.current + 1;
-    latestDashboardRequestIdRef.current = requestId;
-    let dashboardMonth = requestedMonth;
-    let requestPromise;
+    setCards(dashboardData.cards);
+    setCardBaseCharges(dashboardData.cardBaseCharges);
+    setFixedBills(dashboardData.fixedBills);
+    setSubscriptions(dashboardData.subscriptions);
+    setHistory(dashboardData.history);
+    setApiBillingMonthOptions(nextBillingMonthOptions);
+    setSalaryInput(dashboardData.salaryInput);
+    latestBillingMonthOptionsRef.current = nextBillingMonthOptions;
+    lastAppliedDashboardMonthRef.current = dashboardData.monthKey;
+  }, []);
 
-    requestPromise = (async () => {
-      try {
-        setLoading(true);
-        setError("");
-        const latestBillingMonths = await fetchBillingMonthsData();
-        const nextBillingMonthOptions =
-          latestBillingMonths.length > 0
-            ? latestBillingMonths
-            : [requestedMonth];
-        dashboardMonth = nextBillingMonthOptions.includes(requestedMonth)
-          ? requestedMonth
-          : nextBillingMonthOptions[0];
+  const rememberBillingMonthOption = useCallback((monthKey) => {
+    const normalizedMonth = normalizeMonthKey(monthKey);
+    if (!normalizedMonth) return;
 
-        const existingDashboardRequest =
-          dashboardRequestsRef.current.get(dashboardMonth);
-        if (
-          existingDashboardRequest &&
-          existingDashboardRequest !== requestPromise
-        ) {
-          if (dashboardMonth !== requestedMonth) {
-            setSelectedBillingMonth(dashboardMonth);
-          }
-          return existingDashboardRequest;
+    const nextBillingMonthOptions = getBillingMonthOptions([
+      ...latestBillingMonthOptionsRef.current,
+      normalizedMonth,
+    ]);
+
+    latestBillingMonthOptionsRef.current = nextBillingMonthOptions;
+    setApiBillingMonthOptions(nextBillingMonthOptions);
+  }, []);
+
+  const invalidateDashboardMonth = useCallback((monthKey) => {
+    const normalizedMonth = normalizeMonthKey(monthKey);
+    if (!normalizedMonth) return;
+
+    dashboardCacheRef.current.delete(normalizedMonth);
+  }, []);
+
+  const loadDashboard = useCallback(
+    async (monthKey, options = {}) => {
+      const requestedMonth =
+        normalizeMonthKey(monthKey) || getCurrentMonthKey();
+      const forceRefresh = options.forceRefresh === true;
+
+      if (!forceRefresh) {
+        const cachedDashboard = dashboardCacheRef.current.get(requestedMonth);
+        if (cachedDashboard) {
+          setError("");
+          applyDashboardData(cachedDashboard, { fromCache: true });
+          return cachedDashboard;
         }
 
-        dashboardRequestsRef.current.set(dashboardMonth, requestPromise);
-
-        if (dashboardMonth !== requestedMonth) {
-          setSelectedBillingMonth(dashboardMonth);
-        }
-        const data = await fetchDashboardData(dashboardMonth);
-
-        if (requestId !== latestDashboardRequestIdRef.current) {
-          return data;
-        }
-
-        /*console.log("Dashboard API:", data);*/
-
-        const apiCards = (data.cards || data.cartoes || []).map((card) => ({
-          id: Number(card.id ?? card.Id),
-          name: card.name ?? card.Nome ?? card.nome,
-          closeDay:
-            card.closeDay ?? card.DiaFechamento ?? card.diaFechamento ?? null,
-          dueDay: card.dueDay ?? card.DiaVencimento ?? card.diaVencimento,
-          paid: toBoolean(card.paid ?? card.Pago ?? card.pago),
-          tone: card.tone ?? card.CorClasse ?? card.corClasse,
-        }));
-        const rawCardBaseCharges =
-          data.cardBaseCharges ||
-          data.cartaoBaseParcelas ||
-          data.baseParcelas ||
-          [];
-        const apiCardBaseCharges = rawCardBaseCharges.map(
-          normalizeCardBaseCharge,
-        );
-        const apiFixedBills = (data.fixedBills || data.contasFixas || []).map(
-          normalizeFixedBill,
-        );
-        const apiSubscriptions = (
-          data.subscriptions ||
-          data.recorrentes ||
-          []
-        ).map(normalizeSubscription);
-        const apiHistory = (data.history || data.historico || []).map((item) =>
-          normalizeHistoryItem(item, apiCards),
-        );
-        const apiSalary = getSalaryFromDashboardData(data);
-        setCards(apiCards);
-        setCardBaseCharges(apiCardBaseCharges);
-        setFixedBills(apiFixedBills);
-        setSubscriptions(apiSubscriptions);
-        setHistory(apiHistory);
-        setApiBillingMonthOptions(nextBillingMonthOptions);
-        setSalaryInput(formatApiMoneyInput(apiSalary));
-        lastAppliedDashboardMonthRef.current = dashboardMonth;
-        return data;
-      } catch (err) {
-        if (requestId === latestDashboardRequestIdRef.current) {
-          console.error(err);
-          setError(err.message || "Erro inesperado ao carregar dashboard.");
-        }
-        return null;
-      } finally {
-        if (
-          dashboardRequestsRef.current.get(requestedMonth) === requestPromise
-        ) {
-          dashboardRequestsRef.current.delete(requestedMonth);
-        }
-        if (
-          dashboardRequestsRef.current.get(dashboardMonth) === requestPromise
-        ) {
-          dashboardRequestsRef.current.delete(dashboardMonth);
-        }
-        if (requestId === latestDashboardRequestIdRef.current) {
-          setLoading(false);
+        const currentRequest = dashboardRequestsRef.current.get(requestedMonth);
+        if (currentRequest) {
+          return currentRequest;
         }
       }
-    })();
 
-    dashboardRequestsRef.current.set(requestedMonth, requestPromise);
-    return requestPromise;
-  }, []);
+      const requestId = latestDashboardRequestIdRef.current + 1;
+      latestDashboardRequestIdRef.current = requestId;
+
+      const requestPromise = (async () => {
+        try {
+          setDashboardLoading(true);
+          setError("");
+
+          const data = await fetchDashboardData(requestedMonth);
+          const dashboardData = normalizeDashboardPayload(data, requestedMonth);
+
+          dashboardCacheRef.current.set(dashboardData.monthKey, dashboardData);
+          if (dashboardData.monthKey !== requestedMonth) {
+            dashboardCacheRef.current.set(requestedMonth, dashboardData);
+          }
+
+          if (requestId !== latestDashboardRequestIdRef.current) {
+            return dashboardData;
+          }
+
+          applyDashboardData(dashboardData);
+          return dashboardData;
+        } catch (err) {
+          if (requestId === latestDashboardRequestIdRef.current) {
+            console.error(err);
+            setError(err.message || "Erro inesperado ao carregar dashboard.");
+          }
+          return null;
+        } finally {
+          if (
+            dashboardRequestsRef.current.get(requestedMonth) === requestPromise
+          ) {
+            dashboardRequestsRef.current.delete(requestedMonth);
+          }
+          if (requestId === latestDashboardRequestIdRef.current) {
+            setDashboardLoading(false);
+          }
+        }
+      })();
+
+      dashboardRequestsRef.current.set(requestedMonth, requestPromise);
+      return requestPromise;
+    },
+    [applyDashboardData],
+  );
+
+  const refreshDashboardMonth = useCallback(
+    (monthKey) => {
+      const requestedMonth =
+        normalizeMonthKey(monthKey) || getCurrentMonthKey();
+      invalidateDashboardMonth(requestedMonth);
+      return loadDashboard(requestedMonth, { forceRefresh: true });
+    },
+    [invalidateDashboardMonth, loadDashboard],
+  );
   const recurringTotalsByCard = useMemo(
     () => calculateRecurringTotalsByCard(subscriptions),
     [subscriptions],
@@ -2136,7 +2175,7 @@ function App() {
         amount: "0,00",
         dueDay: "",
       });
-      await loadDashboard(activeBillingMonth);
+      await refreshDashboardMonth(activeBillingMonth);
     } catch (err) {
       console.error("Erro ao cadastrar conta fixa:", err);
       setError(err.message || "Erro inesperado ao cadastrar conta fixa.");
@@ -2228,11 +2267,12 @@ function App() {
           "Mês criado, mas não foi possível copiar o salário anterior.";
       }
 
+      rememberBillingMonthOption(billingMonthToCreate);
+      invalidateDashboardMonth(billingMonthToCreate);
       setSelectedBillingMonth(billingMonthToCreate);
       setSelectedHistoryMonth(billingMonthToCreate);
       setNewBillingMonth("");
 
-      await loadDashboard(billingMonthToCreate);
       if (salaryCopyError) {
         setError(salaryCopyError);
       }
@@ -2280,7 +2320,7 @@ function App() {
         throw new Error(responseData?.error || "Erro ao atualizar conta fixa.");
       }
       cancelEditingFixedBill();
-      await loadDashboard(activeBillingMonth);
+      await refreshDashboardMonth(activeBillingMonth);
     } catch (err) {
       console.error("Erro ao atualizar conta fixa:", err);
       setError(err.message || "Erro inesperado ao atualizar conta fixa.");
@@ -2308,7 +2348,7 @@ function App() {
       if (editingFixedBillId === billId) {
         cancelEditingFixedBill();
       }
-      await loadDashboard(activeBillingMonth);
+      await refreshDashboardMonth(activeBillingMonth);
     } catch (err) {
       console.error("Erro ao remover conta fixa:", err);
       setError(err.message || "Erro inesperado ao remover conta fixa.");
@@ -2345,7 +2385,7 @@ function App() {
           responseData?.error || "Erro ao atualizar status do cartão.",
         );
       }
-      await loadDashboard(activeBillingMonth);
+      await refreshDashboardMonth(activeBillingMonth);
     } catch (err) {
       console.error("Erro ao atualizar status do cartão:", err);
       setError(err.message || "Erro inesperado ao atualizar status do cartão.");
@@ -2363,7 +2403,7 @@ function App() {
       setLoading(true);
       setError("");
       await saveSalaryForMonth(activeBillingMonth, numericValue);
-      await loadDashboard(activeBillingMonth);
+      await refreshDashboardMonth(activeBillingMonth);
     } catch (err) {
       console.error("Erro ao salvar salário:", err);
       setError(err.message || "Erro inesperado ao salvar salário.");
@@ -2400,7 +2440,7 @@ function App() {
           responseData?.error || "Erro ao atualizar status da conta fixa.",
         );
       }
-      await loadDashboard(activeBillingMonth);
+      await refreshDashboardMonth(activeBillingMonth);
     } catch (err) {
       console.error("Erro ao atualizar status da conta fixa:", err);
       setError(
@@ -2462,7 +2502,6 @@ function App() {
       const nextHistoryMonth = isHistoryByBillingMonth
         ? activeBillingMonth
         : getMonthKeyFromDateText(expense.dateInput);
-      setSelectedBillingMonth(activeBillingMonth);
       setSelectedHistoryMonth(nextHistoryMonth);
       setExpense({
         cardId: Number(selectedCard.id ?? selectedCard.Id),
@@ -2470,7 +2509,7 @@ function App() {
         amount: "",
         dateInput: getCurrentDateTimeLocal(),
       });
-      await loadDashboard(activeBillingMonth);
+      await refreshDashboardMonth(activeBillingMonth);
     } catch (err) {
       console.error("Erro ao cadastrar gasto:", err);
       setError(err.message || "Erro inesperado ao cadastrar gasto.");
@@ -2531,7 +2570,7 @@ function App() {
         category: "Streaming",
         inInvoice: true,
       });
-      await loadDashboard(activeBillingMonth);
+      await refreshDashboardMonth(activeBillingMonth);
     } catch (err) {
       console.error("Erro ao cadastrar recorrente:", err);
       setError(
@@ -2604,7 +2643,7 @@ function App() {
         );
       }
       cancelEditingSubscription();
-      await loadDashboard(activeBillingMonth);
+      await refreshDashboardMonth(activeBillingMonth);
     } catch (err) {
       console.error("Erro ao atualizar recorrente:", err);
       setError(
@@ -2631,7 +2670,7 @@ function App() {
           responseData?.error || "Erro ao remover streaming/recorrente.",
         );
       }
-      await loadDashboard(activeBillingMonth);
+      await refreshDashboardMonth(activeBillingMonth);
     } catch (err) {
       console.error("Erro ao remover recorrente:", err);
       setError(
@@ -2680,7 +2719,7 @@ function App() {
           responseData?.error || "Erro ao atualizar fatura do recorrente.",
         );
       }
-      await loadDashboard(activeBillingMonth);
+      await refreshDashboardMonth(activeBillingMonth);
     } catch (err) {
       console.error("Erro ao atualizar fatura do recorrente:", err);
       setError(
@@ -2717,7 +2756,7 @@ function App() {
           responseData?.error || "Erro ao atualizar cartão do recorrente.",
         );
       }
-      await loadDashboard(activeBillingMonth);
+      await refreshDashboardMonth(activeBillingMonth);
     } catch (err) {
       console.error("Erro ao atualizar cartão do recorrente:", err);
       setError(
@@ -2788,9 +2827,13 @@ function App() {
         throw new Error(responseData?.error || "Erro ao atualizar gasto.");
       }
       setSelectedHistoryMonth(nextHistoryMonth);
-      setSelectedBillingMonth(nextMonth);
       cancelEditingHistory();
-      await loadDashboard(nextMonth);
+      if (nextMonth !== activeBillingMonth) {
+        invalidateDashboardMonth(nextMonth);
+        setSelectedBillingMonth(nextMonth);
+      } else {
+        await refreshDashboardMonth(nextMonth);
+      }
     } catch (err) {
       console.error("Erro ao atualizar gasto:", err);
       setError(err.message || "Erro inesperado ao atualizar gasto.");
@@ -2803,7 +2846,8 @@ function App() {
       `Deseja excluir o gasto "${item.description}" no valor de ${currency.format(getHistoryAmount(item))}?`,
     );
     if (!confirmed) return;
-    const itemMonth = getHistoryMonthKey(item);
+    const itemMonth =
+      normalizeMonthKey(getHistoryMonthKey(item)) || activeBillingMonth;
     try {
       setLoading(true);
       setError("");
@@ -2817,7 +2861,12 @@ function App() {
       if (editingHistoryId === item.id) {
         cancelEditingHistory();
       }
-      await loadDashboard(itemMonth);
+      if (itemMonth !== activeBillingMonth) {
+        invalidateDashboardMonth(itemMonth);
+        setSelectedBillingMonth(itemMonth);
+      } else {
+        await refreshDashboardMonth(itemMonth);
+      }
     } catch (err) {
       console.error("Erro ao excluir gasto:", err);
       setError(err.message || "Erro inesperado ao excluir gasto.");
@@ -2872,7 +2921,7 @@ function App() {
       if (!response.ok) {
         throw new Error(responseData?.error || "Erro ao salvar base/parcelas.");
       }
-      await loadDashboard(activeBillingMonth);
+      await refreshDashboardMonth(activeBillingMonth);
       setBaseChargeInputs((current) => {
         const nextInputs = { ...current };
         delete nextInputs[inputKey];
@@ -2891,9 +2940,9 @@ function App() {
   return (
     <main className="min-h-screen overflow-x-hidden bg-slate-100 px-3 py-4 text-slate-900 sm:px-5 sm:py-6 lg:px-8 xl:px-10">
       <div className="mx-auto w-full max-w-[1600px] space-y-5 sm:space-y-6">
-        {loading && (
-          <div className="rounded-2xl border border-slate-200 bg-white p-4 text-sm font-semibold text-slate-600 shadow-sm">
-            Carregando dados do banco...
+        {dashboardLoading && (
+          <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-600 shadow-sm">
+            Atualizando dashboard...
           </div>
         )}
 
@@ -3959,9 +4008,7 @@ function App() {
                         type="button"
                         aria-pressed={!isHistoryByBillingMonth}
                         onClick={() =>
-                          setSelectedHistoryView(
-                            HISTORY_VIEW_BY_EXPENSE_DATE,
-                          )
+                          setSelectedHistoryView(HISTORY_VIEW_BY_EXPENSE_DATE)
                         }
                         className={`rounded-lg px-3 py-2 text-sm font-bold transition ${
                           !isHistoryByBillingMonth

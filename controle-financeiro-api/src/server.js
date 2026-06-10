@@ -148,14 +148,6 @@ app.use((err, req, res, next) => {
   return res.status(statusCode).json(payload);
 });
 
-getPool()
-  .then(() => {
-    console.log("[STARTUP] Banco conectado com sucesso");
-  })
-  .catch((error) => {
-    console.error("[STARTUP] Erro ao conectar no banco:", error.message);
-  });
-
 const port = process.env.PORT || 3001;
 
 app.listen(port, () => {
