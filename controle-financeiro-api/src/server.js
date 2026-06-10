@@ -86,6 +86,18 @@ app.get("/", (req, res) => {
   });
 });
 
+
+app.get("/health", (req, res) => {
+  res.status(200).json({
+    ok: true,
+    status: "online",
+    service: "API Controle Financeiro",
+    timestamp: new Date().toISOString(),
+  });
+});
+
+
+
 app.use(cors(corsOptions));
 app.use(express.json());
 
