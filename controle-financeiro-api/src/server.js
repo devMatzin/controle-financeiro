@@ -69,6 +69,8 @@ app.get("/", (req, res) => {
 });
 
 app.get("/health", (req, res) => {
+  console.log(`[HEALTH CHECK] ${new Date().toISOString()} - ${req.ip}`);
+
   res.status(200).json({
     ok: true,
     status: "online",
