@@ -79,6 +79,20 @@ app.get("/health", (req, res) => {
   });
 });
 
+app.use((req, res, next) => {
+  const start = Date.now();
+
+  res.on("finish", () => {
+    const duration = Date.now() - start;
+
+    console.log(
+      `[REQ] ${new Date().toISOString()} ${req.method} ${req.originalUrl} ${res.statusCode} - ${duration}ms`
+    );
+  });
+
+  next();
+});
+
 app.get("/api/test-db", async (req, res) => {
   try {
     const pool = await getPool();
@@ -133,6 +147,14 @@ app.use((err, req, res, next) => {
 
   return res.status(statusCode).json(payload);
 });
+
+getPool()
+  .then(() => {
+    console.log("[STARTUP] Banco conectado com sucesso");
+  })
+  .catch((error) => {
+    console.error("[STARTUP] Erro ao conectar no banco:", error.message);
+  });
 
 const port = process.env.PORT || 3001;
 
