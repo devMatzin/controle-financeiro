@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CreditCard,
   CalendarDays,
@@ -1801,68 +1801,123 @@ function App() {
   const [salaryInput, setSalaryInput] = useState("1.900,00");
   const parsedSalary = parseMoney(salaryInput);
   const salary = Number.isFinite(parsedSalary) ? parsedSalary : 0;
+  const dashboardRequestsRef = useRef(new Map());
+  const latestDashboardRequestIdRef = useRef(0);
+  const lastAppliedDashboardMonthRef = useRef("");
 
   const loadDashboard = useCallback(async (monthKey) => {
-    try {
-      setLoading(true);
-      setError("");
-      const latestBillingMonths = await fetchBillingMonthsData();
-      const requestedMonth =
-        normalizeMonthKey(monthKey) || getCurrentMonthKey();
-      const nextBillingMonthOptions =
-        latestBillingMonths.length > 0 ? latestBillingMonths : [requestedMonth];
-      const dashboardMonth = nextBillingMonthOptions.includes(requestedMonth)
-        ? requestedMonth
-        : nextBillingMonthOptions[0];
-      if (dashboardMonth !== requestedMonth) {
-        setSelectedBillingMonth(dashboardMonth);
-      }
-      const data = await fetchDashboardData(dashboardMonth);
-
-      /*console.log("Dashboard API:", data);*/
-
-      const apiCards = (data.cards || data.cartoes || []).map((card) => ({
-        id: Number(card.id ?? card.Id),
-        name: card.name ?? card.Nome ?? card.nome,
-        closeDay:
-          card.closeDay ?? card.DiaFechamento ?? card.diaFechamento ?? null,
-        dueDay: card.dueDay ?? card.DiaVencimento ?? card.diaVencimento,
-        paid: toBoolean(card.paid ?? card.Pago ?? card.pago),
-        tone: card.tone ?? card.CorClasse ?? card.corClasse,
-      }));
-      const rawCardBaseCharges =
-        data.cardBaseCharges ||
-        data.cartaoBaseParcelas ||
-        data.baseParcelas ||
-        [];
-      const apiCardBaseCharges = rawCardBaseCharges.map(
-        normalizeCardBaseCharge,
-      );
-      const apiFixedBills = (data.fixedBills || data.contasFixas || []).map(
-        normalizeFixedBill,
-      );
-      const apiSubscriptions = (
-        data.subscriptions ||
-        data.recorrentes ||
-        []
-      ).map(normalizeSubscription);
-      const apiHistory = (data.history || data.historico || []).map((item) =>
-        normalizeHistoryItem(item, apiCards),
-      );
-      const apiSalary = getSalaryFromDashboardData(data);
-      setCards(apiCards);
-      setCardBaseCharges(apiCardBaseCharges);
-      setFixedBills(apiFixedBills);
-      setSubscriptions(apiSubscriptions);
-      setHistory(apiHistory);
-      setApiBillingMonthOptions(nextBillingMonthOptions);
-      setSalaryInput(formatApiMoneyInput(apiSalary));
-    } catch (err) {
-      console.error(err);
-      setError(err.message || "Erro inesperado ao carregar dashboard.");
-    } finally {
-      setLoading(false);
+    const requestedMonth = normalizeMonthKey(monthKey) || getCurrentMonthKey();
+    const currentRequest = dashboardRequestsRef.current.get(requestedMonth);
+    if (currentRequest) {
+      return currentRequest;
     }
+
+    const requestId = latestDashboardRequestIdRef.current + 1;
+    latestDashboardRequestIdRef.current = requestId;
+    let dashboardMonth = requestedMonth;
+    let requestPromise;
+
+    requestPromise = (async () => {
+      try {
+        setLoading(true);
+        setError("");
+        const latestBillingMonths = await fetchBillingMonthsData();
+        const nextBillingMonthOptions =
+          latestBillingMonths.length > 0
+            ? latestBillingMonths
+            : [requestedMonth];
+        dashboardMonth = nextBillingMonthOptions.includes(requestedMonth)
+          ? requestedMonth
+          : nextBillingMonthOptions[0];
+
+        const existingDashboardRequest =
+          dashboardRequestsRef.current.get(dashboardMonth);
+        if (
+          existingDashboardRequest &&
+          existingDashboardRequest !== requestPromise
+        ) {
+          if (dashboardMonth !== requestedMonth) {
+            setSelectedBillingMonth(dashboardMonth);
+          }
+          return existingDashboardRequest;
+        }
+
+        dashboardRequestsRef.current.set(dashboardMonth, requestPromise);
+
+        if (dashboardMonth !== requestedMonth) {
+          setSelectedBillingMonth(dashboardMonth);
+        }
+        const data = await fetchDashboardData(dashboardMonth);
+
+        if (requestId !== latestDashboardRequestIdRef.current) {
+          return data;
+        }
+
+        /*console.log("Dashboard API:", data);*/
+
+        const apiCards = (data.cards || data.cartoes || []).map((card) => ({
+          id: Number(card.id ?? card.Id),
+          name: card.name ?? card.Nome ?? card.nome,
+          closeDay:
+            card.closeDay ?? card.DiaFechamento ?? card.diaFechamento ?? null,
+          dueDay: card.dueDay ?? card.DiaVencimento ?? card.diaVencimento,
+          paid: toBoolean(card.paid ?? card.Pago ?? card.pago),
+          tone: card.tone ?? card.CorClasse ?? card.corClasse,
+        }));
+        const rawCardBaseCharges =
+          data.cardBaseCharges ||
+          data.cartaoBaseParcelas ||
+          data.baseParcelas ||
+          [];
+        const apiCardBaseCharges = rawCardBaseCharges.map(
+          normalizeCardBaseCharge,
+        );
+        const apiFixedBills = (data.fixedBills || data.contasFixas || []).map(
+          normalizeFixedBill,
+        );
+        const apiSubscriptions = (
+          data.subscriptions ||
+          data.recorrentes ||
+          []
+        ).map(normalizeSubscription);
+        const apiHistory = (data.history || data.historico || []).map((item) =>
+          normalizeHistoryItem(item, apiCards),
+        );
+        const apiSalary = getSalaryFromDashboardData(data);
+        setCards(apiCards);
+        setCardBaseCharges(apiCardBaseCharges);
+        setFixedBills(apiFixedBills);
+        setSubscriptions(apiSubscriptions);
+        setHistory(apiHistory);
+        setApiBillingMonthOptions(nextBillingMonthOptions);
+        setSalaryInput(formatApiMoneyInput(apiSalary));
+        lastAppliedDashboardMonthRef.current = dashboardMonth;
+        return data;
+      } catch (err) {
+        if (requestId === latestDashboardRequestIdRef.current) {
+          console.error(err);
+          setError(err.message || "Erro inesperado ao carregar dashboard.");
+        }
+        return null;
+      } finally {
+        if (
+          dashboardRequestsRef.current.get(requestedMonth) === requestPromise
+        ) {
+          dashboardRequestsRef.current.delete(requestedMonth);
+        }
+        if (
+          dashboardRequestsRef.current.get(dashboardMonth) === requestPromise
+        ) {
+          dashboardRequestsRef.current.delete(dashboardMonth);
+        }
+        if (requestId === latestDashboardRequestIdRef.current) {
+          setLoading(false);
+        }
+      }
+    })();
+
+    dashboardRequestsRef.current.set(requestedMonth, requestPromise);
+    return requestPromise;
   }, []);
   const recurringTotalsByCard = useMemo(
     () => calculateRecurringTotalsByCard(subscriptions),
@@ -1893,8 +1948,14 @@ function App() {
     saveCachedBillingMonth(activeBillingMonth);
   }, [activeBillingMonth]);
   useEffect(() => {
+    if (lastAppliedDashboardMonthRef.current === activeBillingMonth) {
+      return undefined;
+    }
+
     const timeoutId = window.setTimeout(() => {
-      loadDashboard(activeBillingMonth);
+      if (lastAppliedDashboardMonthRef.current !== activeBillingMonth) {
+        loadDashboard(activeBillingMonth);
+      }
     }, 0);
 
     return () => window.clearTimeout(timeoutId);
