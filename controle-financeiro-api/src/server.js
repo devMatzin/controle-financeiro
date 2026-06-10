@@ -79,6 +79,39 @@ app.get("/health", (req, res) => {
   });
 });
 
+app.get("/warm-db", async (req, res) => {
+  const warmDbToken = process.env.WARM_DB_TOKEN;
+  const providedToken = req.query.token;
+
+  if (warmDbToken && providedToken !== warmDbToken) {
+    return res.status(401).json({
+      ok: false,
+      error: "Unauthorized",
+    });
+  }
+
+  try {
+    const pool = await getPool();
+    await pool.request().query("SELECT 1 AS ok;");
+
+    const timestamp = new Date().toISOString();
+    console.log(`[WARM DB] ${timestamp} - ${req.ip}`);
+
+    return res.status(200).json({
+      ok: true,
+      database: "online",
+      timestamp,
+    });
+  } catch (error) {
+    console.error(`[WARM DB ERROR] ${error.message}`);
+
+    return res.status(500).json({
+      ok: false,
+      error: "Erro ao aquecer o banco de dados.",
+    });
+  }
+});
+
 app.use((req, res, next) => {
   const start = Date.now();
 
