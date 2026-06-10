@@ -552,6 +552,12 @@ function normalizeMonthKey(value) {
   if (month < 1 || month > 12) return "";
   return `${match[1]}-${match[2]}`;
 }
+function isPastMonthKey(monthKey) {
+  const normalizedMonthKey = normalizeMonthKey(monthKey);
+  return Boolean(
+    normalizedMonthKey && normalizedMonthKey < getCurrentMonthKey(),
+  );
+}
 function getApiMonthKey(item) {
   if (typeof item === "string" || typeof item === "number") {
     return normalizeMonthKey(item);
@@ -1569,6 +1575,18 @@ function runSelfTests() {
     "Janeiro deve copiar salário de dezembro do ano anterior.",
   );
   console.assert(
+    isPastMonthKey("1900-01"),
+    "Mes antigo deve poder ser excluido.",
+  );
+  console.assert(
+    !isPastMonthKey(getCurrentMonthKey()),
+    "Mes atual nao deve poder ser excluido.",
+  );
+  console.assert(
+    !isPastMonthKey("9999-12"),
+    "Mes futuro nao deve poder ser excluido.",
+  );
+  console.assert(
     parseApiMoney("1900.5") === 1900.5,
     "parseApiMoney deve aceitar decimal retornado pela API.",
   );
@@ -1795,6 +1813,7 @@ function App() {
 
   const [newBillingMonth, setNewBillingMonth] = useState("");
   const [apiBillingMonthOptions, setApiBillingMonthOptions] = useState([]);
+  const [deletingBillingMonth, setDeletingBillingMonth] = useState("");
 
   const [cards, setCards] = useState([]);
   const [fixedBills, setFixedBills] = useState([]);
@@ -1983,6 +2002,9 @@ function App() {
   const activeBillingMonth = billingMonthOptions.includes(selectedBillingMonth)
     ? selectedBillingMonth
     : billingMonthOptions[0] || getCurrentMonthKey();
+  const canDeleteActiveBillingMonth = isPastMonthKey(activeBillingMonth);
+  const isDeletingActiveBillingMonth =
+    deletingBillingMonth === activeBillingMonth;
   useEffect(() => {
     saveCachedBillingMonth(activeBillingMonth);
   }, [activeBillingMonth]);
@@ -2280,6 +2302,75 @@ function App() {
       console.error("Erro ao adicionar mês da fatura:", err);
       setError(err.message || "Erro inesperado ao adicionar mês da fatura.");
     } finally {
+      setLoading(false);
+    }
+  }
+
+  async function deleteBillingMonth() {
+    const billingMonthToDelete = normalizeMonthKey(activeBillingMonth);
+
+    if (!billingMonthToDelete) {
+      setError("Informe um mes de fatura valido.");
+      return;
+    }
+
+    if (!isPastMonthKey(billingMonthToDelete)) {
+      setError("Somente meses anteriores ao mes atual podem ser excluidos.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Excluir ${getMonthLabel(billingMonthToDelete)}? Todos os gastos, salario, bases/parcelas e marcacoes de pagamento desse mes serao apagados do banco. Esta acao nao pode ser desfeita.`,
+    );
+
+    if (!confirmed) return;
+
+    const remainingBillingMonths = billingMonthOptions.filter(
+      (monthKey) => monthKey !== billingMonthToDelete,
+    );
+    const nextBillingMonth = remainingBillingMonths[0] || getCurrentMonthKey();
+
+    try {
+      setDeletingBillingMonth(billingMonthToDelete);
+      setLoading(true);
+      setError("");
+
+      const response = await fetch(
+        `${API_URL}/meses/${encodeURIComponent(billingMonthToDelete)}`,
+        {
+          method: "DELETE",
+        },
+      );
+      const responseData = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        throw new Error(
+          responseData?.error || "Erro ao excluir mes da fatura.",
+        );
+      }
+
+      dashboardRequestsRef.current.delete(billingMonthToDelete);
+      dashboardCacheRef.current.delete(billingMonthToDelete);
+      latestBillingMonthOptionsRef.current = remainingBillingMonths;
+      setApiBillingMonthOptions(remainingBillingMonths);
+      setSelectedBillingMonth(nextBillingMonth);
+      setSelectedHistoryMonth((current) =>
+        current === billingMonthToDelete ? nextBillingMonth : current,
+      );
+      setBaseChargeInputs((current) =>
+        Object.fromEntries(
+          Object.entries(current).filter(
+            ([inputKey]) => !inputKey.startsWith(`${billingMonthToDelete}-`),
+          ),
+        ),
+      );
+
+      await loadDashboard(nextBillingMonth, { forceRefresh: true });
+    } catch (err) {
+      console.error("Erro ao excluir mes da fatura:", err);
+      setError(err.message || "Erro inesperado ao excluir mes da fatura.");
+    } finally {
+      setDeletingBillingMonth("");
       setLoading(false);
     }
   }
@@ -3500,6 +3591,25 @@ function App() {
                       ))}
                     </select>
                   </label>
+
+                  <button
+                    type="button"
+                    onClick={deleteBillingMonth}
+                    disabled={loading || !canDeleteActiveBillingMonth}
+                    title={
+                      canDeleteActiveBillingMonth
+                        ? `Excluir ${getMonthLabel(activeBillingMonth)}`
+                        : "Disponivel somente para meses anteriores ao atual"
+                    }
+                    className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-2xl border border-rose-200 bg-white px-5 text-sm font-bold text-rose-600 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400 disabled:opacity-70"
+                  >
+                    <Trash2 size={16} />
+                    <span>
+                      {isDeletingActiveBillingMonth
+                        ? "Excluindo..."
+                        : "Excluir mes"}
+                    </span>
+                  </button>
 
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                     <p className="text-sm font-bold text-slate-900">
