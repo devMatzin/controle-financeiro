@@ -17,12 +17,14 @@ const config = {
 
   pool: {
     max: 5,
-    min: 1,
+    min: 0,
     idleTimeoutMillis: 30000,
+    acquireTimeoutMillis: 60000,
+    createTimeoutMillis: 60000,
   },
 
-  connectionTimeout: 30000,
-  requestTimeout: 30000,
+  connectionTimeout: 60000,
+  requestTimeout: 60000,
 };
 
 let poolPromise = null;
@@ -34,15 +36,21 @@ async function getPool() {
       .then((pool) => {
         console.log("[DB] Pool conectado com sucesso");
 
-        pool.on("error", (error) => {
-          console.error("[DB] Erro no pool:", error);
+        pool.on("error", async (error) => {
+          console.error("[DB] Erro no pool:", error.message);
           poolPromise = null;
+
+          try {
+            await pool.close();
+          } catch {
+            // ignora erro ao fechar pool quebrado
+          }
         });
 
         return pool;
       })
       .catch((error) => {
-        console.error("[DB] Erro ao conectar:", error);
+        console.error("[DB] Erro ao conectar:", error.message);
         poolPromise = null;
         throw error;
       });
